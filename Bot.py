@@ -1,5 +1,5 @@
 """
-🎵 Discord Music Bot - Fixed Version
+🎵 Discord Music Bot - Voice Fix
 """
 
 import discord
@@ -8,6 +8,7 @@ import wavelink
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
 import os
+import asyncio
 
 # ============================================
 # CONFIGURATION
@@ -53,7 +54,7 @@ async def on_ready():
     print(f'║   Guilds: {len(bot.guilds)}                      ║')
     print(f'╚══════════════════════════════════════╝')
     
-    # Initialize Wavelink (optional)
+    # Initialize Wavelink
     try:
         nodes = wavelink.NodePool()
         await nodes.create_node(
@@ -75,37 +76,55 @@ async def on_wavelink_node_ready(node: wavelink.Node):
 
 @bot.event
 async def on_command_error(ctx, error):
-    if isinstance(error, commands.CommandNotFound):
-        await ctx.send("❌ Command tidak ditemukan!")
-    else:
-        await ctx.send(f"❌ Error: {str(error)}")
-        print(f"Error: {error}")
+    await ctx.send(f"❌ Error: {str(error)}")
+    print(f"Error: {error}")
 
 # ============================================
 # HELPER FUNCTIONS
 # ============================================
 
 def get_spotify_track_info(url):
-    """Ambil info dari Spotify track URL"""
     if not sp:
         return None
     try:
         track_id = url.split("/")[-1].split("?")[0]
         track = sp.track(track_id)
-        return {
-            "name": track["name"],
-            "artist": track["artists"][0]["name"]
-        }
-    except Exception as e:
-        print(f"Spotify error: {e}")
+        return {"name": track["name"], "artist": track["artists"][0]["name"]}
+    except:
         return None
 
 # ============================================
 # MUSIC COMMANDS
 # ============================================
 
+@bot.command(name="join", aliases=["masuk"])
+async def join(ctx):
+    """Bot join voice channel"""
+    if not ctx.author.voice:
+        await ctx.send("❌ Kamu harus di voice channel dulu!")
+        return
+    
+    try:
+        vc = ctx.author.voice.channel
+        player = await vc.connect()
+        await ctx.send(f"✅ Joined **{vc.name}**!")
+        print(f"Joined voice channel: {vc.name}")
+    except Exception as e:
+        await ctx.send(f"❌ Error join voice: {e}")
+        print(f"Join error: {e}")
+
+@bot.command(name="leave", aliases=["keluar"])
+async def leave(ctx):
+    """Bot leave voice channel"""
+    if ctx.voice_client:
+        await ctx.voice_client.disconnect()
+        await ctx.send("👋 Left voice channel!")
+    else:
+        await ctx.send("❌ Bot tidak di voice channel!")
+
 @bot.command(name="play", aliases=["p", "pl"])
 async def play(ctx, *, query):
+    """Mainkan musik"""
     if not ctx.author.voice:
         await ctx.send("❌ Kamu harus di voice channel!")
         return
@@ -113,41 +132,59 @@ async def play(ctx, *, query):
     try:
         # Connect to voice
         if not ctx.voice_client:
-            vc = await ctx.author.voice.channel.connect(cls=wavelink.Player)
-        else:
-            vc = ctx.voice_client
+            try:
+                vc = ctx.author.voice.channel
+                await vc.connect()
+                await asyncio.sleep(1)  # Tunggu connect
+            except Exception as e:
+                await ctx.send(f"❌ Gagal connect: {e}")
+                return
         
-        # Check if Spotify URL
+        vc = ctx.voice_client
+        
+        # Check Spotify
         if "spotify.com" in query and "track" in query:
             info = get_spotify_track_info(query)
             if info:
-                search_query = f"{info['name']} {info['artist']}"
-                await ctx.send(f"🔍 Mencari: {search_query}")
-                query = search_query
+                query = f"{info['name']} {info['artist']}"
+                await ctx.send(f"🔍 Mencari: {query}")
         
         # Search YouTube
-        tracks = await vc.node.get_tracks(wavelink.YouTubeTrack, f"ytsearch:{query}")
+        try:
+            tracks = await wavelink.NodePool.get_node().get_tracks(
+                wavelink.YouTubeTrack, f"ytsearch:{query}"
+            )
+        except Exception as e:
+            await ctx.send(f"❌ Error cari lagu: {e}")
+            return
+        
         if not tracks:
             await ctx.send("❌ Lagu tidak ditemukan!")
             return
         
         track = tracks[0]
-        await vc.play(track)
-        await ctx.send(f"🎶 Playing: **{track.title}**")
+        
+        try:
+            await vc.play(track)
+            await ctx.send(f"🎶 Playing: **{track.title}**")
+            print(f"Playing: {track.title}")
+        except Exception as e:
+            await ctx.send(f"❌ Error play: {e}")
+            print(f"Play error: {e}")
         
     except Exception as e:
         await ctx.send(f"❌ Error: {e}")
-        print(f"Play error: {e}")
+        print(f"Overall error: {e}")
 
 @bot.command(name="pause")
 async def pause(ctx):
-    if ctx.voice_client and ctx.voice_client.is_playing():
+    if ctx.voice_client:
         await ctx.voice_client.pause()
         await ctx.send("⏸️ Paused!")
 
 @bot.command(name="resume")
 async def resume(ctx):
-    if ctx.voice_client and ctx.voice_client.is_paused():
+    if ctx.voice_client:
         await ctx.voice_client.resume()
         await ctx.send("▶️ Resumed!")
 
@@ -159,27 +196,16 @@ async def stop(ctx):
 
 @bot.command(name="skip")
 async def skip(ctx):
-    if ctx.voice_client and ctx.voice_client.is_playing():
+    if ctx.voice_client:
         await ctx.voice_client.stop()
         await ctx.send("⏭️ Skipped!")
 
 @bot.command(name="nowplaying", aliases=["np"])
 async def nowplaying(ctx):
-    if ctx.voice_client and ctx.voice_client.is_playing():
-        track = ctx.voice_client.current
-        await ctx.send(f"🎵 **{track.title}**")
-
-@bot.command(name="join")
-async def join(ctx):
-    if ctx.author.voice:
-        await ctx.author.voice.channel.connect(cls=wavelink.Player)
-        await ctx.send("✅ Joined!")
-
-@bot.command(name="leave")
-async def leave(ctx):
-    if ctx.voice_client:
-        await ctx.voice_client.disconnect()
-        await ctx.send("👋 Left!")
+    if ctx.voice_client and ctx.voice_client.current:
+        await ctx.send(f"🎵 **{ctx.voice_client.current.title}**")
+    else:
+        await ctx.send("❌ Tidak ada lagu!")
 
 @bot.command(name="ping")
 async def ping(ctx):
@@ -190,14 +216,14 @@ async def help_command(ctx):
     await ctx.send("""
 🎵 **Commands:**
 
+!join - Bot masuk voice
 !play <lagu> - Mainkan musik
 !pause - Jeda
 !resume - Lanjut
 !skip - Skip
 !stop - Stop
 !np - Lagu sekarang
-!join - Masuk voice
-!leave - Keluar voice
+!leave - Bot keluar
 !ping - Ping
 !help - Help
 """)
