@@ -1,209 +1,132 @@
-"""
-🎵 Discord Music Bot - Wavelink v3 + Spotify
-"""
-
 import discord
 from discord.ext import commands
-import wavelink
+import yt_dlp
+import asyncio
+import os
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
-import os
-import asyncio
 
-# ============================================
-# CONFIGURATION
-# ============================================
+TOKEN = os.getenv("TOKEN")
+SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
+SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
 
-DISCORD_TOKEN = os.environ.get('DISCORD_TOKEN')
-SPOTIFY_CLIENT_ID = os.environ.get('SPOTIFY_CLIENT_ID')
-SPOTIFY_CLIENT_SECRET = os.environ.get('SPOTIFY_CLIENT_SECRET')
+intents = discord.Intents.all()
+bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Setup Spotify
-sp = None
-if SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET:
-    try:
-        auth_manager = SpotifyClientCredentials(
-            client_id=SPOTIFY_CLIENT_ID,
-            client_secret=SPOTIFY_CLIENT_SECRET
-        )
-        sp = spotipy.Spotify(auth_manager=auth_manager)
-        print("✅ Spotify connected!")
-    except Exception as e:
-        print(f"⚠️ Spotify error: {e}")
+# Spotify
+sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials(
+    client_id=SPOTIFY_CLIENT_ID,
+    client_secret=SPOTIFY_CLIENT_SECRET
+))
 
-# Setup Intents
-intents = discord.Intents.default()
-intents.message_content = True
-intents.voice_states = True
+# YTDL
+ytdl_format_options = {
+    'format': 'bestaudio/best',
+    'quiet': True,
+    'noplaylist': True
+}
 
-# Initialize Bot
-bot = commands.Bot(
-    command_prefix="!",
-    intents=intents,
-    help_command=None
-)
+ffmpeg_options = {
+    'options': '-vn'
+}
 
-# ============================================
-# EVENTS
-# ============================================
+ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
 
-@bot.event
-async def on_ready():
-    print(f'✅ Bot {bot.user.name} is online!')
-    print(f'Guilds: {len(bot.guilds)}')
-    
-    # Connect to Lavalink
-    try:
-        await wavelink.Node.connect(
-            bot=bot,
-            host='lavalinkinc.ml',
-            password='youshallnotpass',
-            port=443,
-            https=True
-        )
-        print("✅ Lavalink connected!")
-    except Exception as e:
-        print(f"⚠️ Lavalink error: {e}")
+# ================= MUSIC SYSTEM =================
 
-@bot.event
-async def on_wavelink_node_ready(node):
-    print(f"🎵 Node {node.host} is ready!")
+class MusicPlayer:
+    def __init__(self):
+        self.queue = []
+        self.is_playing = False
+        self.vc = None
+
+    async def play_next(self, ctx):
+        if len(self.queue) > 0:
+            self.is_playing = True
+            url, title = self.queue.pop(0)
+
+            source = await discord.FFmpegOpusAudio.from_probe(url, **ffmpeg_options)
+            self.vc.play(source, after=lambda e: asyncio.run_coroutine_threadsafe(self.play_next(ctx), bot.loop))
+
+            await ctx.send(f"🎶 Now Playing: **{title}**")
+        else:
+            self.is_playing = False
+            await asyncio.sleep(60)
+            if not self.is_playing and self.vc:
+                await self.vc.disconnect()
+
+music = MusicPlayer()
+
+async def get_song(query):
+    if "spotify.com" in query:
+        track = sp.track(query)
+        query = f"{track['name']} {track['artists'][0]['name']}"
+
+    info = ytdl.extract_info(f"ytsearch:{query}", download=False)['entries'][0]
+    return info['url'], info['title']
+
+@bot.command()
+async def play(ctx, *, query):
+    if not ctx.author.voice:
+        return await ctx.send("Masuk voice channel dulu!")
+
+    channel = ctx.author.voice.channel
+
+    if music.vc is None or not music.vc.is_connected():
+        music.vc = await channel.connect()
+
+    url, title = await get_song(query)
+    music.queue.append((url, title))
+
+    await ctx.send(f"➕ Ditambahkan ke queue: **{title}**")
+
+    if not music.is_playing:
+        await music.play_next(ctx)
+
+@bot.command()
+async def skip(ctx):
+    if music.vc and music.vc.is_playing():
+        music.vc.stop()
+        await ctx.send("⏭️ Lagu diskip")
+
+@bot.command()
+async def pause(ctx):
+    if music.vc and music.vc.is_playing():
+        music.vc.pause()
+        await ctx.send("⏸️ Dipause")
+
+@bot.command()
+async def resume(ctx):
+    if music.vc and music.vc.is_paused():
+        music.vc.resume()
+        await ctx.send("▶️ Dilanjutkan")
+
+@bot.command()
+async def queue(ctx):
+    if len(music.queue) == 0:
+        return await ctx.send("Queue kosong.")
+
+    msg = ""
+    for i, song in enumerate(music.queue):
+        msg += f"{i+1}. {song[1]}\n"
+
+    await ctx.send(f"📜 Queue:\n{msg}")
+
+@bot.command()
+async def stop(ctx):
+    music.queue.clear()
+    if music.vc:
+        await music.vc.disconnect()
+    await ctx.send("⏹️ Music dihentikan")
+
+# ================= ERROR HANDLER =================
 
 @bot.event
 async def on_command_error(ctx, error):
-    await ctx.send(f"❌ Error: {str(error)}")
-    print(f"Error: {error}")
+    await ctx.send(f"⚠️ Error: {str(error)}")
 
-# ============================================
-# HELPER FUNCTIONS
-# ============================================
+@bot.event
+async def on_ready():
+    print(f"Bot online sebagai {bot.user}")
 
-def get_spotify_track_info(url):
-    if not sp:
-        return None
-    try:
-        track_id = url.split("/")[-1].split("?")[0]
-        track = sp.track(track_id)
-        return {"name": track["name"], "artist": track["artists"][0]["name"]}
-    except:
-        return None
-
-# ============================================
-# MUSIC COMMANDS
-# ============================================
-
-@bot.command(name="join", aliases=["masuk"])
-async def join(ctx):
-    if not ctx.author.voice:
-        await ctx.send("❌ Kamu harus di voice channel!")
-        return
-    
-    try:
-        await ctx.author.voice.channel.connect(cls=wavelink.Player)
-        await ctx.send(f"✅ Joined {ctx.author.voice.channel.name}!")
-    except Exception as e:
-        await ctx.send(f"❌ Error: {e}")
-
-@bot.command(name="leave", aliases=["keluar"])
-async def leave(ctx):
-    if ctx.voice_client:
-        await ctx.voice_client.disconnect()
-        await ctx.send("👋 Left!")
-    else:
-        await ctx.send("❌ Bot tidak di voice!")
-
-@bot.command(name="play", aliases=["p", "pl"])
-async def play(ctx, *, query):
-    if not ctx.author.voice:
-        await ctx.send("❌ Kamu harus di voice channel!")
-        return
-    
-    try:
-        # Connect if not connected
-        if not ctx.voice_client:
-            await ctx.author.voice.channel.connect(cls=wavelink.Player)
-        
-        player = ctx.voice_client
-        
-        # Handle Spotify
-        if "spotify.com" in query and "track" in query:
-            info = get_spotify_track_info(query)
-            if info:
-                query = f"{info['name']} {info['artist']}"
-                await ctx.send(f"🔍 Mencari: {query}")
-        
-        # Search
-        tracks = await player.node.get_tracks(wavelink.YouTubeTrack, f"ytsearch:{query}")
-        
-        if not tracks:
-            await ctx.send("❌ Lagu tidak ditemukan!")
-            return
-        
-        track = tracks[0]
-        await player.play(track)
-        await ctx.send(f"🎶 Playing: **{track.title}**")
-        
-    except Exception as e:
-        await ctx.send(f"❌ Error: {e}")
-        print(f"Play error: {e}")
-
-@bot.command(name="pause")
-async def pause(ctx):
-    if ctx.voice_client:
-        await ctx.voice_client.pause()
-        await ctx.send("⏸️ Paused!")
-
-@bot.command(name="resume")
-async def resume(ctx):
-    if ctx.voice_client:
-        await ctx.voice_client.resume()
-        await ctx.send("▶️ Resumed!")
-
-@bot.command(name="stop")
-async def stop(ctx):
-    if ctx.voice_client:
-        await ctx.voice_client.stop()
-        await ctx.send("⏹️ Stopped!")
-
-@bot.command(name="skip")
-async def skip(ctx):
-    if ctx.voice_client:
-        await ctx.voice_client.stop()
-        await ctx.send("⏭️ Skipped!")
-
-@bot.command(name="nowplaying", aliases=["np"])
-async def nowplaying(ctx):
-    if ctx.voice_client and ctx.voice_client.current:
-        await ctx.send(f"🎵 **{ctx.voice_client.current.title}**")
-    else:
-        await ctx.send("❌ Tidak ada lagu!")
-
-@bot.command(name="ping")
-async def ping(ctx):
-    await ctx.send(f"🏓 Pong! {round(bot.latency*1000)}ms")
-
-@bot.command(name="help")
-async def help_cmd(ctx):
-    await ctx.send("""
-🎵 **Commands:**
-
-!join - Masuk voice
-!play <lagu> - Mainkan musik
-!pause - Jeda
-!resume - Lanjut
-!skip - Skip
-!stop - Stop
-!np - Lagu sekarang
-!leave - Keluar
-!ping - Ping
-""")
-
-# ============================================
-# RUN BOT
-# ============================================
-
-if __name__ == "__main__":
-    if DISCORD_TOKEN:
-        bot.run(DISCORD_TOKEN)
-    else:
-        print("❌ Token tidak ada!")
+bot.run(TOKEN)
