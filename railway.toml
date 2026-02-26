@@ -1,4 +1,0 @@
-# railway.toml
-
-[build]
-builder = "NIXPACKS_PYTHON"
