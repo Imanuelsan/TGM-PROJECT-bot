@@ -1,1 +1,1 @@
-web: python TGM.py
+worker: python Bot.py
